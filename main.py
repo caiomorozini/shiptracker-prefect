@@ -281,6 +281,6 @@ if __name__ == "__main__":
 
     # To deploy as a scheduled flow:
     sync_ssw_tracking.serve(
-        name="ssw-tracking-sync",
-        cron="*/30 * * * *"  # Every 30 minutes
+        name="ssw_tracking_sync",
+        cron="*/60 * * * *"  # Every 60 minutes
     )
