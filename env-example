@@ -1,0 +1,6 @@
+# ShipTracker API Configuration
+API_BASE_URL=http://127.0.0.1:8000/api/v1
+
+# API Key for cronjob authentication
+# Generate a strong key: python -c "import secrets; print(secrets.token_urlsafe(32))"
+CRONJOB_API_KEY=your-cronjob-api-key-here-change-in-production
