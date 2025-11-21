@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional
 import os
 
-load_dotenv()
+
 # API Configuration
 API_BASE_URL: str = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")
 API_KEY: str = os.getenv("CRONJOB_API_KEY", "")
