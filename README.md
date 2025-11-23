@@ -46,31 +46,55 @@ uv sync
 
 ## 🏃 Execução
 
-### Execução Manual
+### Execução Manual (Local)
 
-Execute o flow uma vez:
-
-```bash
-uv run python main.py
-```
-
-### Deploy com Agendamento
-
-Para executar periodicamente (ex: a cada 15 minutos):
-
-```python
-# Descomente no main.py:
-sync_ssw_tracking.serve(
-    name="ssw-tracking-sync",
-    cron="*/15 * * * *"  # A cada 15 minutos
-)
-```
-
-Execute:
+Execute o flow uma vez localmente:
 
 ```bash
 uv run python main.py
 ```
+
+### 🚀 Deploy para Produção
+
+⚠️ **IMPORTANTE**: Quando fizer deploy no Prefect Cloud/Server, o código roda em um worker remoto que **não tem acesso ao localhost**!
+
+#### Deploy Rápido (Assistido)
+
+Use o script helper:
+
+```bash
+./deploy.sh
+```
+
+O script oferece 4 opções:
+1. Deploy simples (variáveis via CLI)
+2. Deploy com Prefect Blocks (recomendado para produção)
+3. Criar apenas os Prefect Blocks
+4. Testar comunicação com a API
+
+#### Deploy Manual
+
+```bash
+# Opção 1: Via CLI com variáveis
+prefect deploy \
+  --name ssw-tracking-sync \
+  --pool default-pool \
+  --variable API_BASE_URL=https://sua-api.com/api/v1 \
+  --variable CRONJOB_API_KEY=sua-api-key
+
+# Opção 2: Via Blocks (recomendado)
+# 1. Criar secrets
+prefect block create secret api-base-url --value "https://sua-api.com/api/v1"
+prefect block create secret cronjob-api-key --value "sua-api-key"
+
+# 2. Deploy
+prefect deploy --all
+
+# 3. Iniciar worker
+prefect worker start --pool default-pool
+```
+
+📚 **Guia Completo**: Veja [DEPLOYMENT.md](./DEPLOYMENT.md) para instruções detalhadas
 
 ## 📊 Fluxo de Dados
 
@@ -130,6 +154,49 @@ Configure a mesma API Key em:
 ```
 
 ## 🐛 Troubleshooting
+
+### 🔴 Prefect não consegue se comunicar com a API após deploy
+
+**Sintoma**: O flow funciona localmente mas falha após o deploy
+```
+httpx.ConnectError: [Errno 111] Connection refused
+```
+
+**Causa**: O código roda em um worker remoto que não tem acesso ao `localhost` (127.0.0.1)
+
+**Solução**:
+1. Configure `API_BASE_URL` com a URL pública da API (ex: `https://sua-api.com/api/v1`)
+2. Use Prefect Blocks ou variáveis de ambiente no deployment
+3. Veja o guia completo em [DEPLOYMENT.md](./DEPLOYMENT.md)
+
+**Teste rápido**:
+```bash
+./deploy.sh  # Escolha opção 4 para testar comunicação
+```
+
+### 🔴 FileNotFoundError: No such file or directory
+
+**Sintoma**: 
+```
+FileNotFoundError: [Errno 2] No such file or directory: '/home/caiomorozini/Dev/shiptracker/shiptracker-prefect'
+```
+
+**Causa**: Você está usando um **Managed Work Pool** que executa no ambiente Prefect Cloud, não localmente.
+
+**Solução RÁPIDA**:
+```bash
+# Rode o worker LOCALMENTE
+cd /home/caiomorozini/Dev/shiptracker/shiptracker-prefect
+source .venv/bin/activate
+prefect worker start --pool default-work-pool
+
+# Em outro terminal, execute o flow
+prefect deployment run sync_ssw_tracking/ssw-tracking-sync
+```
+
+📚 **Guia Completo**: [SOLUCAO_RAPIDA.md](./SOLUCAO_RAPIDA.md)
+
+**Solução PRODUÇÃO**: Veja [PREFECT_MANAGED_WORKER.md](./PREFECT_MANAGED_WORKER.md) para configurar GitHub ou Docker
 
 ### Erro de Autenticação
 ```

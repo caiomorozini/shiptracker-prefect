@@ -1,9 +1,32 @@
+# Prefect project configuration
+name: shiptracker-prefect
+
+# Pull code from GitHub for Managed Work Pool
+pull:
+  - prefect.deployments.steps.git_clone:
+      repository: https://github.com/caiomorozini/shiptracker-prefect.git
+      branch: main
+      access_token: null  # Use GitHub Block para repositórios privados
+
+# Deployment configurations
 deployments:
   - name: ssw-tracking-sync
-    flow_name: sync_ssw_tracking
-    entrypoint: main.py:ssw_tracking_sync
+    version: 1.0.0
+    tags:
+      - production
+      - ssw
+      - tracking
+    description: "Sincronização automática de rastreamento SSW"
+    entrypoint: main.py:sync_ssw_tracking
     schedule:
       cron: "*/60 * * * *"   # a cada 1 hora
       timezone: "America/Sao_Paulo"
+      active: true
+    parameters: {}
     work_pool:
-      name: default-pool
+      name: default-work-pool
+      work_queue_name: default
+      job_variables:
+        env:
+          API_BASE_URL: "{{ prefect.blocks.secret.api-base-url }}"
+          CRONJOB_API_KEY: "{{ prefect.blocks.secret.cronjob-api-key }}"
