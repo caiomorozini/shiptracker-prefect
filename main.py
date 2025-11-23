@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 import os
 
+load_dotenv()
 
 # API Configuration
 API_BASE_URL: str = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")
@@ -17,10 +18,15 @@ if not API_KEY:
 
 
 @task
-def scrape_ssw_tracking(cnpj: str, invoice_number: str) -> Optional[dict]:
+def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[dict]) -> Optional[dict]:
     """
     Scrape tracking data from SSW website
     Returns parsed tracking data or None if failed
+    
+    Args:
+        cnpj: Customer CNPJ
+        invoice_number: Invoice number to track
+        occurrence_codes: Pre-fetched list of occurrence codes from API
     """
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -53,11 +59,15 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str) -> Optional[dict]:
                 unit_match = re.search(r"(\d{4})", unit_text)
                 unit = unit_match.group(1) if unit_match else None
 
-                # Extract location
-                location_match = re.findall(r"(\w+)", location_datetime)
-                location = (
-                    " ".join(location_match[:2]) if len(location_match) >= 2 else None
-                )
+                # Extract location (format: "RIO DE JANEIRO / RJ18/11/25\n16:35")
+                # Split by date pattern to separate location from datetime
+                location_match = re.match(r"^(.+?)(?=\d{2}/\d{2}/\d{2})", location_datetime)
+                if location_match:
+                    location = location_match.group(1).strip()
+                    # Clean up any trailing slashes or spaces
+                    location = re.sub(r'\s*/\s*$', '', location).strip()
+                else:
+                    location = None
 
                 # Extract date and time
                 date_match = re.search(r"(\d{2}/\d{2}/\d{2})", location_datetime)
@@ -71,23 +81,99 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str) -> Optional[dict]:
                         f"{date_str} {time_str}", "%d/%m/%y %H:%M"
                     )
 
-                    # Extract status and occurrence code
-                    status_parts = status_text.split("  ")
-                    status = status_parts[0].strip()
-
-                    # Extract only numeric occurrence code (2 digits)
-                    occurrence_code = None
-                    if len(status_parts) > 1:
-                        # Try to extract numeric code (format: "01", "02", etc)
-                        code_match = re.search(r"\b(\d{2})\b", status_parts[1])
-                        if code_match:
-                            occurrence_code = code_match.group(1)
-
+                    # Extract status and occurrence code from status_text
+                    # Example: "MERCADORIA ENTREGUE  (SSW WebAPI Parceiro)."
+                    # Example: "ENTREGA REALIZADA NORMALMENTE" should match codes with "entrega"
+                    # Strategy: Multi-level matching for maximum compatibility
+                    occurrence_code = {}
+                    best_match_score = 0
+                    
+                    # Clean status text (remove extra info like "(SSW WebAPI Parceiro)")
+                    status_text_clean = re.sub(r'\s*\(.*?\)\s*\.?$', '', status_text).strip()
+                    status_text_upper = status_text_clean.upper()
+                    
+                    # Extract significant words (ignore common words)
+                    status_words = set(re.findall(r'\b\w+\b', status_text_upper))
+                    ignore_words = {'DE', 'DA', 'DO', 'PARA', 'COM', 'SEM', 'POR', 'AO', 'A', 'O', 'E'}
+                    status_keywords = status_words - ignore_words
+                    
+                    # Sort by description length (descending) to check longer/more specific matches first
+                    sorted_codes = sorted(
+                        occurrence_codes, 
+                        key=lambda x: len(x["description"]), 
+                        reverse=True
+                    )
+                    
+                    for code in sorted_codes:
+                        description_upper = code["description"].upper()
+                        
+                        # Level 1: Exact substring match (highest priority)
+                        if description_upper in status_text_upper:
+                            match_score = len(description_upper) * 100  # Highest score
+                        elif status_text_upper in description_upper:
+                            match_score = len(status_text_upper) * 100
+                        else:
+                            # Level 2: Word-based matching (check keyword overlap)
+                            desc_words = set(re.findall(r'\b\w+\b', description_upper))
+                            desc_keywords = desc_words - ignore_words
+                            
+                            # Calculate overlap
+                            common_words = status_keywords & desc_keywords
+                            
+                            if common_words:
+                                # Score based on number of matching words and their length
+                                match_score = sum(len(word) for word in common_words)
+                            else:
+                                match_score = 0
+                        
+                        # Keep the best match
+                        if match_score > best_match_score:
+                            occurrence_code = code
+                            best_match_score = match_score
+                    
+                    # Map occurrence to shipment status
+                    # Use 'process' as primary indicator for finalization
+                    event_status = "in_transit"  # default
+                    if occurrence_code:
+                        occ_type = occurrence_code.get("type", "").lower()
+                        occ_process = occurrence_code.get("process", "").lower()
+                        
+                        # Priority 1: Check 'process' for finalization indicators
+                        if occ_process == "entrega":
+                            # Entrega process = delivered (even if type is "pendência transportadora")
+                            event_status = "delivered"
+                        elif occ_process == "finalizadora":
+                            # Finalizadora process = also delivered/finalized
+                            event_status = "delivered"
+                        elif occ_process == "devolução":
+                            # Return to sender
+                            event_status = "returned"
+                        
+                        # Priority 2: Check 'type' for specific cases
+                        elif occ_type == "baixa":
+                            event_status = "cancelled"
+                        elif occ_type == "préentrega":
+                            event_status = "out_for_delivery"
+                        
+                        # Priority 3: Delivery attempts and holding
+                        elif occ_process == "reentrega":
+                            event_status = "failed_delivery"
+                        elif occ_process == "agendamento":
+                            event_status = "awaiting_pickup"
+                        elif "pendência" in occ_type:
+                            event_status = "held"
+                        
+                        # Priority 4: Operational/informative events
+                        elif occ_process in ["operacional", "coleta", "geral"]:
+                            event_status = "in_transit"
+                        elif occ_type == "informativa":
+                            event_status = "in_transit"
+                    
                     events.append(
                         {
-                            "occurrence_code": occurrence_code,
-                            "status": status,
-                            "description": status_text.strip(),
+                            "occurrence_code": occurrence_code.get("code", ""),
+                            "status": event_status,
+                            "description": occurrence_code.get("description", ""),
                             "location": location,
                             "unit": unit,
                             "occurred_at": occurred_at.isoformat(),
@@ -204,15 +290,34 @@ def get_pending_shipments() -> list[dict]:
         return []
 
 
-@flow(name="SSW Tracking Sync")
+@flow(name="sync_ssw_tracking")
 def sync_ssw_tracking():
     """
     Main flow to sync SSW tracking data
-    1. Fetch pending shipments from API
-    2. Scrape tracking data from SSW for each shipment
-    3. Update API with new tracking data
+    1. Fetch occurrence codes from API (once)
+    2. Fetch pending shipments from API
+    3. Scrape tracking data from SSW for each shipment
+    4. Update API with new tracking data
     """
     print("🚀 Starting SSW tracking sync...")
+
+    # Fetch occurrence codes once (used by all shipments)
+    print("📋 Fetching occurrence codes...")
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                f"{API_BASE_URL}/tracking-updates/occurrence-codes",
+                headers={"X-API-Key": API_KEY},
+            )
+            if response.status_code != 200:
+                print(f"⚠️ API returned status {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+            response.raise_for_status()
+            occurrence_codes = response.json()
+            print(f"✓ Loaded {len(occurrence_codes)} occurrence codes")
+    except Exception as e:
+        print(f"❌ Failed to fetch occurrence codes: {e}")
+        return []
 
     # Get pending shipments
     pending_shipments = get_pending_shipments()
@@ -230,7 +335,9 @@ def sync_ssw_tracking():
 
         # Scrape tracking data
         tracking_data = scrape_ssw_tracking(
-            cnpj=shipment["cnpj"], invoice_number=shipment["invoice_number"]
+            cnpj=shipment["cnpj"], 
+            invoice_number=shipment["invoice_number"],
+            occurrence_codes=occurrence_codes
         )
 
         if tracking_data:
@@ -241,11 +348,11 @@ def sync_ssw_tracking():
             results.append(result)
 
             if result["success"]:
-                print(f"  ✓ Successfully updated API")
+                print("  ✓ Successfully updated API")
             else:
                 print(f"  ✗ Failed to update API: {result.get('error')}")
         else:
-            print(f"  ✗ No tracking data found")
+            print("  ✗ No tracking data found")
             results.append(
                 {
                     "success": False,
@@ -277,10 +384,10 @@ def sync_ssw_tracking():
 
 if __name__ == "__main__":
     # Run the flow
-    # sync_ssw_tracking()
+    sync_ssw_tracking()
 
     # To deploy as a scheduled flow:
-    sync_ssw_tracking.serve(
-        name="ssw_tracking_sync",
-        cron="*/60 * * * *"  # Every 60 minutes
-    )
+    # sync_ssw_tracking.serve(
+    #     name="ssw_tracking_sync",
+    #     cron="*/60 * * * *"  # Every 60 minutes
+    # )

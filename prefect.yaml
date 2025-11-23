@@ -1,6 +1,6 @@
 deployments:
   - name: ssw-tracking-sync
-    flow_name: ssw_tracking_sync
+    flow_name: sync_ssw_tracking
     entrypoint: main.py:ssw_tracking_sync
     schedule:
       cron: "*/60 * * * *"   # a cada 1 hora
