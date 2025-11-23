@@ -300,6 +300,8 @@ def sync_ssw_tracking():
     4. Update API with new tracking data
     """
     print("🚀 Starting SSW tracking sync...")
+    print(f"🔧 API_BASE_URL: {API_BASE_URL}")
+    print(f"🔑 API_KEY configured: {'Yes' if API_KEY else 'No'}")
 
     # Fetch occurrence codes once (used by all shipments)
     print("📋 Fetching occurrence codes...")
