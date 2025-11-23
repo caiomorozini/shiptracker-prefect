@@ -6,7 +6,10 @@ pull:
   - prefect.deployments.steps.git_clone:
       repository: https://github.com/caiomorozini/shiptracker-prefect.git
       branch: main
-      access_token: null  # Use GitHub Block para repositórios privados
+      access_token: null
+  - prefect.deployments.steps.pip_install_requirements:
+      requirements_file: requirements.txt
+      stream_output: False  # Use GitHub Block para repositórios privados
 
 # Deployment configurations
 deployments:
