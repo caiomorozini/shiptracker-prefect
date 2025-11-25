@@ -18,11 +18,13 @@ if not API_KEY:
 
 
 @task
-def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[dict]) -> Optional[dict]:
+def scrape_ssw_tracking(
+    cnpj: str, invoice_number: str, occurrence_codes: list[dict]
+) -> Optional[dict]:
     """
     Scrape tracking data from SSW website
     Returns parsed tracking data or None if failed
-    
+
     Args:
         cnpj: Customer CNPJ
         invoice_number: Invoice number to track
@@ -39,21 +41,44 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
 
         soup = BeautifulSoup(html, "html5lib")
 
-        # Extract all tracking events from paragraphs with class "tdb"
-        # The HTML structure has 3 consecutive <p class="tdb"> for each event:
-        # 1. Unit code
-        # 2. Location and datetime
-        # 3. Status and occurrence code
+        # Extract all tracking events from table cells with class "rastreamento"
+        # The HTML structure for each event:
+        # <td class="rastreamento">
+        #   <p class="titulo">STATUS_CODE (TYPE CODE NUMBER)</p>
+        #   <p class="tdb">DESCRIPTION</p>
+        # </td>
+        # Plus 3 separate <p class="tdb"> for: unit, location+datetime, status description
+
+        # Find all table cells containing tracking events
+        tracking_cells = soup.find_all("td", class_="rastreamento")
+
+        # Also get all standalone tdb paragraphs (for unit, location, datetime)
         tracking_paragraphs = soup.find_all("p", class_="tdb")
 
         events = []
 
-        # Process paragraphs in groups of 3
+        # Process paragraphs in groups of 3 (unit, location+datetime, description)
         for i in range(0, len(tracking_paragraphs), 3):
             if i + 2 < len(tracking_paragraphs):
                 unit_text = tracking_paragraphs[i].get_text(strip=True)
                 location_datetime = tracking_paragraphs[i + 1].get_text(strip=True)
-                status_text = tracking_paragraphs[i + 2].get_text(strip=True)
+                # Skip the third paragraph as it's usually a "more details" link
+
+                # Find the corresponding titulo paragraph to get the status code
+                # Look for the nearest preceding titulo element
+                titulo_elem = None
+                current_elem = tracking_paragraphs[i]
+                for _ in range(10):  # Search up to 10 parents/siblings
+                    parent = current_elem.find_parent()
+                    if parent:
+                        titulo_elem = parent.find("p", class_="titulo")
+                        if titulo_elem:
+                            break
+                        current_elem = parent
+                    else:
+                        break
+
+                status_text = titulo_elem.get_text(strip=True) if titulo_elem else ""
 
                 # Extract unit (código da unidade)
                 unit_match = re.search(r"(\d{4})", unit_text)
@@ -61,11 +86,13 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
 
                 # Extract location (format: "RIO DE JANEIRO / RJ18/11/25\n16:35")
                 # Split by date pattern to separate location from datetime
-                location_match = re.match(r"^(.+?)(?=\d{2}/\d{2}/\d{2})", location_datetime)
+                location_match = re.match(
+                    r"^(.+?)(?=\d{2}/\d{2}/\d{2})", location_datetime
+                )
                 if location_match:
                     location = location_match.group(1).strip()
                     # Clean up any trailing slashes or spaces
-                    location = re.sub(r'\s*/\s*$', '', location).strip()
+                    location = re.sub(r"\s*/\s*$", "", location).strip()
                 else:
                     location = None
 
@@ -82,31 +109,50 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
                     )
 
                     # Extract status and occurrence code from status_text
-                    # Example: "MERCADORIA ENTREGUE  (SSW WebAPI Parceiro)."
-                    # Example: "ENTREGA REALIZADA NORMALMENTE" should match codes with "entrega"
+                    # Example: "SAIDA DE UNIDADE(GEN 308 62)" -> "SAIDA DE UNIDADE"
+                    # Example: "MERCADORIA ENTREGUE (SSW WebAPI Parceiro)" -> "MERCADORIA ENTREGUE"
                     # Strategy: Multi-level matching for maximum compatibility
                     occurrence_code = {}
                     best_match_score = 0
-                    
-                    # Clean status text (remove extra info like "(SSW WebAPI Parceiro)")
-                    status_text_clean = re.sub(r'\s*\(.*?\)\s*\.?$', '', status_text).strip()
+
+                    # Clean status text (remove anything in parentheses and trailing punctuation)
+                    print(f"  🔍 Original status_text: {repr(status_text)}")
+                    status_text_clean = re.sub(
+                        r"\s*\(.*?\)\s*", "", status_text
+                    ).strip()
+                    status_text_clean = re.sub(r"\.?$", "", status_text_clean).strip()
+                    # Replace non-breaking spaces with regular spaces
+                    status_text_clean = status_text_clean.replace("\xa0", " ")
                     status_text_upper = status_text_clean.upper()
-                    
+                    print(f"  ✨ Cleaned status_text: {repr(status_text_upper)}")
+
                     # Extract significant words (ignore common words)
-                    status_words = set(re.findall(r'\b\w+\b', status_text_upper))
-                    ignore_words = {'DE', 'DA', 'DO', 'PARA', 'COM', 'SEM', 'POR', 'AO', 'A', 'O', 'E'}
+                    status_words = set(re.findall(r"\b\w+\b", status_text_upper))
+                    ignore_words = {
+                        "DE",
+                        "DA",
+                        "DO",
+                        "PARA",
+                        "COM",
+                        "SEM",
+                        "POR",
+                        "AO",
+                        "A",
+                        "O",
+                        "E",
+                    }
                     status_keywords = status_words - ignore_words
-                    
+
                     # Sort by description length (descending) to check longer/more specific matches first
                     sorted_codes = sorted(
-                        occurrence_codes, 
-                        key=lambda x: len(x["description"]), 
-                        reverse=True
+                        occurrence_codes,
+                        key=lambda x: len(x["description"]),
+                        reverse=True,
                     )
-                    
+
                     for code in sorted_codes:
                         description_upper = code["description"].upper()
-                        
+
                         # Level 1: Exact substring match (highest priority)
                         if description_upper in status_text_upper:
                             match_score = len(description_upper) * 100  # Highest score
@@ -114,30 +160,30 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
                             match_score = len(status_text_upper) * 100
                         else:
                             # Level 2: Word-based matching (check keyword overlap)
-                            desc_words = set(re.findall(r'\b\w+\b', description_upper))
+                            desc_words = set(re.findall(r"\b\w+\b", description_upper))
                             desc_keywords = desc_words - ignore_words
-                            
+
                             # Calculate overlap
                             common_words = status_keywords & desc_keywords
-                            
+
                             if common_words:
                                 # Score based on number of matching words and their length
                                 match_score = sum(len(word) for word in common_words)
                             else:
                                 match_score = 0
-                        
+
                         # Keep the best match
                         if match_score > best_match_score:
                             occurrence_code = code
                             best_match_score = match_score
-                    
+
                     # Map occurrence to shipment status
                     # Use 'process' as primary indicator for finalization
                     event_status = "in_transit"  # default
                     if occurrence_code:
                         occ_type = occurrence_code.get("type", "").lower()
                         occ_process = occurrence_code.get("process", "").lower()
-                        
+
                         # Priority 1: Check 'process' for finalization indicators
                         if occ_process == "entrega":
                             # Entrega process = delivered (even if type is "pendência transportadora")
@@ -148,13 +194,13 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
                         elif occ_process == "devolução":
                             # Return to sender
                             event_status = "returned"
-                        
+
                         # Priority 2: Check 'type' for specific cases
                         elif occ_type == "baixa":
                             event_status = "cancelled"
                         elif occ_type == "préentrega":
                             event_status = "out_for_delivery"
-                        
+
                         # Priority 3: Delivery attempts and holding
                         elif occ_process == "reentrega":
                             event_status = "failed_delivery"
@@ -162,13 +208,13 @@ def scrape_ssw_tracking(cnpj: str, invoice_number: str, occurrence_codes: list[d
                             event_status = "awaiting_pickup"
                         elif "pendência" in occ_type:
                             event_status = "held"
-                        
+
                         # Priority 4: Operational/informative events
                         elif occ_process in ["operacional", "coleta", "geral"]:
                             event_status = "in_transit"
                         elif occ_type == "informativa":
                             event_status = "in_transit"
-                    
+
                     events.append(
                         {
                             "occurrence_code": occurrence_code.get("code", ""),
@@ -337,9 +383,9 @@ def sync_ssw_tracking():
 
         # Scrape tracking data
         tracking_data = scrape_ssw_tracking(
-            cnpj=shipment["cnpj"], 
+            cnpj=shipment["cnpj"],
             invoice_number=shipment["invoice_number"],
-            occurrence_codes=occurrence_codes
+            occurrence_codes=occurrence_codes,
         )
 
         if tracking_data:
